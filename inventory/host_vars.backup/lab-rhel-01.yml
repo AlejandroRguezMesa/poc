@@ -1,0 +1,34 @@
+---
+# Generado automaticamente por generate_host_vars.py
+# Fecha: 2026-05-21T08:58:17
+# Revisa entradas TODO_* antes de usar en renovaciones.
+
+certificates:
+- name: secure-lab-ulpgc-local
+  cert_src: '{{ playbook_dir }}/../files/certs_input/secure.crt'
+  key_src: '{{ playbook_dir }}/../files/certs_input/secure.key'
+  cert_dest: /etc/pki/tls/certs/secure.crt
+  key_dest: /etc/pki/tls/private/secure.key
+  owner: root
+  group: root
+  cert_mode: '0644'
+  key_mode: '0600'
+  service: httpd
+  validate:
+    host: '{{ ansible_host }}'
+    port: 443
+    sni: secure.lab.ulpgc.local
+- name: internal-lab-ulpgc-local
+  cert_src: '{{ playbook_dir }}/../files/certs_input/internal.crt'
+  key_src: '{{ playbook_dir }}/../files/certs_input/internal.key'
+  cert_dest: /etc/pki/tls/certs/internal.crt
+  key_dest: /etc/pki/tls/private/internal.key
+  owner: root
+  group: root
+  cert_mode: '0644'
+  key_mode: '0600'
+  service: httpd
+  validate:
+    host: '{{ ansible_host }}'
+    port: 8443
+    sni: internal.lab.ulpgc.local

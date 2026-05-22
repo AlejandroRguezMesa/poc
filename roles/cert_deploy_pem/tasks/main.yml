@@ -1,0 +1,58 @@
+---
+- name: "[{{ cert.name }}] Validar el cert de origen antes de tocar el host"
+  community.crypto.x509_certificate_info:
+    path: "{{ cert.cert_src }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: src_info
+
+- name: "[{{ cert.name }}] Abortar si el cert de origen está expirado"
+  ansible.builtin.assert:
+    that:
+      - not src_info.expired
+    fail_msg: "El cert {{ cert.cert_src }} está expirado, no se despliega."
+
+- name: "[{{ cert.name }}] Backup del cert actual"
+  ansible.builtin.copy:
+    src: "{{ cert.cert_dest }}"
+    dest: "{{ cert.cert_dest }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    mode: preserve
+  failed_when: false
+
+- name: "[{{ cert.name }}] Desplegar certificado público"
+  ansible.builtin.copy:
+    src: "{{ cert.cert_src }}"
+    dest: "{{ cert.cert_dest }}"
+    owner: "{{ cert.owner }}"
+    group: "{{ cert.group }}"
+    mode: "{{ cert.cert_mode }}"
+  notify: "reload {{ cert.service }}"
+
+- name: "[{{ cert.name }}] Desplegar clave privada"
+  ansible.builtin.copy:
+    src: "{{ cert.key_src }}"
+    dest: "{{ cert.key_dest }}"
+    owner: "{{ cert.owner }}"
+    group: "{{ cert.group }}"
+    mode: "{{ cert.key_mode }}"
+  no_log: true
+  notify: "reload {{ cert.service }}"
+
+- name: "[{{ cert.name }}] Reaplicar contexto SELinux (solo en hosts con SELinux activo)"
+  ansible.builtin.command: "restorecon -Rv {{ cert.cert_dest }} {{ cert.key_dest }}"
+  when: ansible_selinux is defined and ansible_selinux.status == 'enabled'
+  changed_when: false
+
+- name: "Forzar handler ahora para validar antes de seguir"
+  ansible.builtin.meta: flush_handlers
+
+- name: "[{{ cert.name }}] Validar handshake TLS"
+  ansible.builtin.include_role:
+    name: cert_validate
+  vars:
+    v_host: "{{ cert.validate.host }}"
+    v_port: "{{ cert.validate.port }}"
+    v_sni:  "{{ cert.validate.sni }}"
+    v_expected_cn: "{{ src_info.subject.commonName }}"

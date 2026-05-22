@@ -1,0 +1,20 @@
+---
+# Generado automaticamente por generate_host_vars.py
+# Fecha: 2026-05-21T08:58:17
+# Revisa entradas TODO_* antes de usar en renovaciones.
+
+keystores:
+- name: portal-lab-ulpgc-local
+  cert_src: '{{ playbook_dir }}/../files/certs_input/portal.crt'
+  key_src: '{{ playbook_dir }}/../files/certs_input/portal.key'
+  keystore_dest: /etc/tomcat9/portal.p12
+  keystore_password: "{{ vault_keystore }}"
+  keystore_alias: portal-lab-ulpgc-local
+  owner: tomcat
+  group: tomcat
+  mode: '0640'
+  service: tomcat
+  validate:
+    host: '{{ ansible_host }}'
+    port: 8443
+    sni: portal.lab.ulpgc.local

@@ -1,0 +1,14 @@
+---
+# Renovación del certificado de Tomcat.
+# Construye el PKCS#12 en el nodo de control y lo despliega.
+
+- name: Renovar certificado Tomcat
+  hosts: tomcat_servers
+  tasks:
+    - name: Desplegar keystores definidos en host_vars
+      ansible.builtin.include_role:
+        name: cert_deploy_keystore
+      loop: "{{ keystores }}"
+      loop_control:
+        loop_var: ks
+        label: "{{ ks.name }}"

@@ -1,0 +1,166 @@
+---
+# Bootstrap de Apache (httpd) en RHEL 9 / Rocky / Alma.
+# Configura DOS vhosts HTTPS con DOS certificados distintos para demostrar
+# el caso multi-cert en un mismo host.
+
+- name: Instalar httpd, mod_ssl y herramientas
+  ansible.builtin.dnf:
+    name:
+      - httpd
+      - mod_ssl
+      - openssl
+      - python3-cryptography
+      - policycoreutils-python-utils
+    state: present
+
+- name: Asegurar directorios de certs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/pki/tls/certs
+    - /etc/pki/tls/private
+
+# Cert "secure" (vhost en :443)
+- name: Desplegar cert antiguo - secure
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/secure.crt"
+    dest: /etc/pki/tls/certs/secure.crt
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Desplegar key antigua - secure
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/secure.key"
+    dest: /etc/pki/tls/private/secure.key
+    mode: "0600"
+    owner: root
+    group: root
+
+# Cert "internal" (vhost en :8443)
+- name: Desplegar cert antiguo - internal
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/internal.crt"
+    dest: /etc/pki/tls/certs/internal.crt
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Desplegar key antigua - internal
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/internal.key"
+    dest: /etc/pki/tls/private/internal.key
+    mode: "0600"
+    owner: root
+    group: root
+
+- name: Forzar contexto SELinux cert_t en cert y key
+  community.general.sefcontext:
+    target: "{{ item.target }}"
+    setype: cert_t
+    state: present
+  loop:
+    - { target: "/etc/pki/tls/certs/secure\\.crt" }
+    - { target: "/etc/pki/tls/private/secure\\.key" }
+    - { target: "/etc/pki/tls/certs/internal\\.crt" }
+    - { target: "/etc/pki/tls/private/internal\\.key" }
+
+- name: Aplicar restorecon
+  ansible.builtin.command: "restorecon -Rv /etc/pki/tls/certs /etc/pki/tls/private"
+  changed_when: false
+
+# Deshabilitar el ssl.conf por defecto si existe
+- name: Comprobar si existe ssl.conf por defecto
+  ansible.builtin.stat:
+    path: /etc/httpd/conf.d/ssl.conf
+  register: default_ssl_conf
+
+- name: Deshabilitar ssl.conf por defecto
+  ansible.builtin.command: mv /etc/httpd/conf.d/ssl.conf /etc/httpd/conf.d/ssl.conf.disabled
+  when: default_ssl_conf.stat.exists
+  changed_when: default_ssl_conf.stat.exists
+
+- name: Asegurar carga de mod_ssl
+  ansible.builtin.copy:
+    dest: /etc/httpd/conf.modules.d/00-ssl.conf
+    mode: "0644"
+    content: "LoadModule ssl_module modules/mod_ssl.so\n"
+
+# Permitir a httpd escuchar en 8443 con SELinux (no es puerto estándar)
+- name: Permitir a httpd escuchar en :8443 (SELinux)
+  community.general.seport:
+    ports: 8443
+    proto: tcp
+    setype: http_port_t
+    state: present
+
+- name: Configurar vhost secure (:443)
+  ansible.builtin.copy:
+    dest: /etc/httpd/conf.d/secure.conf
+    mode: "0644"
+    content: |
+      Listen 443 https
+
+      <VirtualHost *:443>
+        ServerName secure.lab.ulpgc.local
+        SSLEngine on
+        SSLCertificateFile    /etc/pki/tls/certs/secure.crt
+        SSLCertificateKeyFile /etc/pki/tls/private/secure.key
+        DocumentRoot /var/www/html
+        <Directory /var/www/html>
+          Require all granted
+        </Directory>
+      </VirtualHost>
+  notify: reload httpd
+
+- name: Configurar vhost internal (:8443)
+  ansible.builtin.copy:
+    dest: /etc/httpd/conf.d/internal.conf
+    mode: "0644"
+    content: |
+      Listen 8443 https
+
+      <VirtualHost *:8443>
+        ServerName internal.lab.ulpgc.local
+        SSLEngine on
+        SSLCertificateFile    /etc/pki/tls/certs/internal.crt
+        SSLCertificateKeyFile /etc/pki/tls/private/internal.key
+        DocumentRoot /var/www/html
+        <Directory /var/www/html>
+          Require all granted
+        </Directory>
+      </VirtualHost>
+  notify: reload httpd
+
+- name: Crear health check trivial
+  ansible.builtin.copy:
+    dest: /var/www/html/index.html
+    content: "Hola desde {{ inventory_hostname }} (RHEL+httpd, multi-cert)\n"
+    mode: "0644"
+
+- name: Validar la configuración de httpd
+  ansible.builtin.command: httpd -t
+  register: httpd_test
+  changed_when: false
+
+- name: Mostrar resultado de la validación
+  ansible.builtin.debug:
+    msg: "{{ httpd_test.stderr_lines }}"
+
+- name: Abrir HTTPS y 8443 en firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "443/tcp"
+    - "8443/tcp"
+
+- name: Arrancar y habilitar httpd
+  ansible.builtin.service:
+    name: httpd
+    state: started
+    enabled: true

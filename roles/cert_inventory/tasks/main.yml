@@ -1,0 +1,229 @@
+---
+# Descubrimiento de certificados con detección de:
+#   - Cert files (.crt, .pem) y keystores (.p12, .pfx)
+#   - Procesos en escucha (ss -tlnp)
+#   - Cert servido en cada puerto (handshake TLS) → permite cruce de fingerprints
+#   - Stat del fichero del cert (permisos, owner, group)
+#   - Key adyacente al cert (por convención: misma carpeta o /private/)
+
+- name: Buscar archivos .crt / .pem
+  ansible.builtin.find:
+    paths:
+      - /etc/nginx/ssl
+      - /etc/ssl/private
+      - /etc/ssl/legacy
+      - /etc/tomcat9
+      - /opt/tomcat/conf
+      - /etc/pki/tls/certs
+      - /etc/pki/tls/private
+      - /etc/letsencrypt/live
+    patterns:
+      - "*.crt"
+      - "*.pem"
+    recurse: true
+    file_type: file
+  register: found_pem
+
+- name: Buscar keystores .p12 / .pfx
+  ansible.builtin.find:
+    paths:
+      - /etc/tomcat9
+      - /opt/tomcat/conf
+      - /etc/pki
+      - /etc/nginx/ssl
+    patterns:
+      - "*.p12"
+      - "*.pfx"
+    recurse: true
+    file_type: file
+  register: found_pkcs12
+
+- name: Detectar procesos escuchando TCP (sin asumir puertos)
+  ansible.builtin.shell: |
+    set -o pipefail
+    ss -tlnpH 2>/dev/null | awk '{
+      n = split($4, addr, ":")
+      port = addr[n]
+      if (match($0, /users:\(\("([^"]+)"/, arr)) {
+        print port "=" arr[1]
+      }
+    }' | sort -u
+  args:
+    executable: /bin/bash
+  register: listening_procs
+  changed_when: false
+  failed_when: false
+
+- name: Mapping puerto → proceso
+  ansible.builtin.set_fact:
+    port_to_process: >-
+      {{ dict(listening_procs.stdout_lines | map('split', '=')) }}
+
+- name: Handshake TLS en cada puerto escuchado → fingerprint
+  ansible.builtin.shell: |
+    set -o pipefail
+    port="{{ item.split('=')[0] }}"
+    fp=$(timeout 2 bash -c "echo | openssl s_client -connect 127.0.0.1:${port} 2>/dev/null" \
+         | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+         | sed 's/^.*=//; s/://g')
+    if [ -n "$fp" ]; then echo "${port}=${fp}"; fi
+  args:
+    executable: /bin/bash
+  loop: "{{ listening_procs.stdout_lines }}"
+  loop_control:
+    label: "{{ item }}"
+  register: tls_probes
+  changed_when: false
+  failed_when: false
+
+- name: Mapping puerto → fingerprint servido
+  ansible.builtin.set_fact:
+    port_to_fingerprint: >-
+      {{ dict(tls_probes.results
+              | map(attribute='stdout', default='')
+              | reject('equalto', '')
+              | map('split', '=')) }}
+
+- name: Extraer info de certs PEM/CRT
+  community.crypto.x509_certificate_info:
+    path: "{{ item.path }}"
+  loop: "{{ found_pem.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: pem_info
+  failed_when: false
+
+- name: Extraer info de keystores .p12
+  community.crypto.openssl_pkcs12:
+    action: parse
+    src: "{{ item.path }}"
+    passphrase: "labpwd"
+    path: "/tmp/_extract_{{ item.path | basename }}.pem"
+  loop: "{{ found_pkcs12.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: p12_extract
+  failed_when: false
+  no_log: true
+
+- name: Leer cert extraído de cada keystore
+  community.crypto.x509_certificate_info:
+    path: "/tmp/_extract_{{ item.item.path | basename }}.pem"
+  loop: "{{ p12_extract.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  register: p12_info
+  when: not item.failed | default(false)
+  failed_when: false
+
+- name: Limpiar temporales
+  ansible.builtin.file:
+    path: "/tmp/_extract_{{ item.item.path | basename }}.pem"
+    state: absent
+  loop: "{{ p12_extract.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: not item.failed | default(false)
+
+# NUEVO: stat de cada cert para capturar owner, group, mode
+- name: Stat de cada cert encontrado (para extraer permisos)
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop: "{{ (found_pem.files + found_pkcs12.files) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: cert_stats
+
+- name: Mapping path → metadata del fichero (owner, group, mode)
+  ansible.builtin.set_fact:
+    path_to_stat: >-
+      {{ dict(
+          cert_stats.results
+          | map(attribute='item.path')
+          | zip(
+              cert_stats.results
+              | map(attribute='stat')
+              | map('combine', {})
+            )
+        ) }}
+
+# NUEVO: por cada cert, buscar key adyacente
+# Convenciones:
+#   /etc/pki/tls/certs/X.crt    → /etc/pki/tls/private/X.key
+#   /etc/nginx/ssl/X.crt        → /etc/nginx/ssl/X.key
+#   /etc/letsencrypt/live/X.../cert.pem → /etc/letsencrypt/live/X.../privkey.pem
+- name: Detectar key adyacente para cada cert
+  ansible.builtin.shell: |
+    cert="{{ item.path }}"
+    base=$(basename "$cert" | sed 's/\.\(crt\|pem\)$//')
+    dir=$(dirname "$cert")
+
+    # Candidatos en orden de preferencia
+    candidates=(
+      "${dir}/${base}.key"
+      "${dir}/${base}.pem"
+      "$(echo "$dir" | sed 's|/certs$|/private|')/${base}.key"
+      "$(dirname $dir)/private/${base}.key"
+      "$(dirname $cert)/privkey.pem"
+    )
+    for c in "${candidates[@]}"; do
+      if sudo test -f "$c" 2>/dev/null; then
+        echo "$c"
+        exit 0
+      fi
+    done
+    echo ""
+  args:
+    executable: /bin/bash
+  loop: "{{ found_pem.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: key_paths
+  changed_when: false
+  failed_when: false
+
+- name: Mapping cert path → key path
+  ansible.builtin.set_fact:
+    cert_to_key: >-
+      {{ dict(
+          key_paths.results
+          | map(attribute='item.path')
+          | zip(
+              key_paths.results
+              | map(attribute='stdout', default='')
+              | map('trim')
+            )
+        ) }}
+
+- name: Construir reporte por host
+  ansible.builtin.set_fact:
+    host_report: >-
+      {{
+        (pem_info.results | default([]))
+        | union(p12_info.results | default([]))
+        | selectattr('subject', 'defined')
+        | rejectattr('subject.commonName', 'match', '^(localhost|ubuntu.*|ACCV.*|DST.*|.*Root CA X1.*|.*\.localdomain)$')
+        | map('combine', {
+            'host': inventory_hostname,
+            'listening_ports': port_to_process,
+            'served_fingerprints': port_to_fingerprint,
+            'file_stats': path_to_stat,
+            'cert_to_key': cert_to_key
+          })
+        | list
+      }}
+
+- name: Asegurar carpeta de reportes en el control node
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../reports"
+    state: directory
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Volcar reporte JSON por host
+  ansible.builtin.copy:
+    content: "{{ host_report | to_nice_json }}"
+    dest: "{{ playbook_dir }}/../reports/{{ inventory_hostname }}.json"
+  delegate_to: localhost
+  become: false

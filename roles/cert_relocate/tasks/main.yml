@@ -1,0 +1,102 @@
+---
+# Mueve un certificado (y su key) desde una ubicación legacy a una nueva,
+# actualiza las referencias en el fichero de configuración del servicio
+# usando lineinfile + regex, valida la config, recarga el servicio, y
+# finalmente borra el cert antiguo.
+#
+# Variables esperadas (desde el playbook):
+#   relocate.cert_old_path     ruta actual del cert (legacy)
+#   relocate.key_old_path      ruta actual de la clave
+#   relocate.cert_new_path     ruta nueva (destino)
+#   relocate.key_new_path      ruta nueva de la clave
+#   relocate.config_file       fichero de configuración a modificar
+#   relocate.cert_regexp       regex que captura la directiva del cert
+#   relocate.key_regexp        regex que captura la directiva de la key
+#   relocate.config_test_cmd   comando para validar la config (nginx -t, etc.)
+#   relocate.service           servicio a recargar
+
+- name: "Comprobar que el cert legacy existe"
+  ansible.builtin.stat:
+    path: "{{ relocate.cert_old_path }}"
+  register: legacy_stat
+
+- name: "Saltar si no hay nada que mover"
+  ansible.builtin.meta: end_play
+  when: not legacy_stat.stat.exists
+
+- name: "Asegurar directorio destino"
+  ansible.builtin.file:
+    path: "{{ relocate.cert_new_path | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: "Copiar cert a la nueva ubicación"
+  ansible.builtin.copy:
+    src: "{{ relocate.cert_old_path }}"
+    dest: "{{ relocate.cert_new_path }}"
+    remote_src: true
+    mode: preserve
+
+- name: "Copiar key a la nueva ubicación"
+  ansible.builtin.copy:
+    src: "{{ relocate.key_old_path }}"
+    dest: "{{ relocate.key_new_path }}"
+    remote_src: true
+    mode: preserve
+
+- name: "Backup del fichero de configuración"
+  ansible.builtin.copy:
+    src: "{{ relocate.config_file }}"
+    dest: "{{ relocate.config_file }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    mode: preserve
+
+- name: "Actualizar referencia al cert en la config (lineinfile + regex)"
+  ansible.builtin.lineinfile:
+    path: "{{ relocate.config_file }}"
+    regexp: "{{ relocate.cert_regexp }}"
+    line: '\1{{ relocate.cert_new_path }};'
+    backrefs: true
+
+- name: "Actualizar referencia a la key en la config (lineinfile + regex)"
+  ansible.builtin.lineinfile:
+    path: "{{ relocate.config_file }}"
+    regexp: "{{ relocate.key_regexp }}"
+    line: '\1{{ relocate.key_new_path }};'
+    backrefs: true
+
+- name: "Validar la configuración del servicio antes de recargar"
+  ansible.builtin.command: "{{ relocate.config_test_cmd }}"
+  register: cfg_test
+  changed_when: false
+
+- name: "Mostrar salida de la validación"
+  ansible.builtin.debug:
+    var: cfg_test.stderr_lines
+
+- name: "Recargar servicio"
+  ansible.builtin.service:
+    name: "{{ relocate.service }}"
+    state: reloaded
+
+- name: "Pequeña espera para que el servicio asiente"
+  ansible.builtin.pause:
+    seconds: 2
+
+- name: "Borrar cert antiguo de la ubicación legacy"
+  ansible.builtin.file:
+    path: "{{ relocate.cert_old_path }}"
+    state: absent
+
+- name: "Borrar key antigua de la ubicación legacy"
+  ansible.builtin.file:
+    path: "{{ relocate.key_old_path }}"
+    state: absent
+
+- name: "Reportar reubicación"
+  ansible.builtin.debug:
+    msg:
+      - "Cert reubicado en {{ inventory_hostname }}:"
+      - "  {{ relocate.cert_old_path }}  →  {{ relocate.cert_new_path }}"
+      - "  {{ relocate.key_old_path }}   →  {{ relocate.key_new_path }}"
+      - "Config actualizada: {{ relocate.config_file }}"

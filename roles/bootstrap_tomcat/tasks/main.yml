@@ -1,0 +1,59 @@
+---
+- name: Instalar Tomcat y OpenSSL
+  ansible.builtin.apt:
+    name:
+      - tomcat9
+      - openssl
+      - python3-cryptography
+    state: present
+    update_cache: true
+
+- name: Construir keystore PKCS#12 en el nodo de control
+  community.crypto.openssl_pkcs12:
+    action: export
+    path: /tmp/portal_bootstrap.p12
+    friendly_name: portal
+    certificate_path: "{{ old_certs_dir }}/portal.crt"
+    privatekey_path:  "{{ old_certs_dir }}/portal.key"
+    passphrase: labpwd
+    state: present
+  delegate_to: localhost
+  become: false
+
+- name: Copiar keystore al host destino
+  ansible.builtin.copy:
+    src: /tmp/portal_bootstrap.p12
+    dest: /etc/tomcat9/portal.p12
+    owner: tomcat
+    group: tomcat
+    mode: "0640"
+
+- name: Limpiar temporal del control node
+  ansible.builtin.file:
+    path: /tmp/portal_bootstrap.p12
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: Configurar conector HTTPS en server.xml (forzando JSSE para evitar tcnative)
+  ansible.builtin.blockinfile:
+    path: /etc/tomcat9/server.xml
+    insertbefore: "</Service>"
+    marker: "<!-- {mark} HTTPS connector (lab) -->"
+    block: |
+      <Connector port="8443" protocol="org.apache.coyote.http11.Http11NioProtocol"
+                 maxThreads="150" SSLEnabled="true"
+                 sslImplementationName="org.apache.tomcat.util.net.jsse.JSSEImplementation">
+        <SSLHostConfig>
+          <Certificate certificateKeystoreFile="/etc/tomcat9/portal.p12"
+                       certificateKeystorePassword="labpwd"
+                       certificateKeystoreType="PKCS12"/>
+        </SSLHostConfig>
+      </Connector>
+  notify: restart tomcat9
+
+- name: Arrancar tomcat
+  ansible.builtin.service:
+    name: tomcat9
+    state: started
+    enabled: true

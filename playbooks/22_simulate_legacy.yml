@@ -1,0 +1,77 @@
+---
+# Prepara el escenario para la demo de reubicación.
+# Simula que en lab-web-01 el certificado vive en una ubicación "legacy"
+# (/etc/ssl/legacy/) en lugar de la estándar (/etc/nginx/ssl/), y que la
+# config de nginx apunta a esa ubicación legacy.
+#
+# Tras ejecutar este playbook tendrás:
+#   /etc/ssl/legacy/apps.crt    (cert)
+#   /etc/ssl/legacy/apps.key    (key)
+#   /etc/nginx/sites-available/apps.conf  apuntando a /etc/ssl/legacy/
+#
+# Después puedes ejecutar 23_relocate_cert.yml para ver la reubicación.
+
+- name: Preparar escenario legacy en lab-web-01
+  hosts: lab-web-01
+  tasks:
+    - name: Crear directorio legacy
+      ansible.builtin.file:
+        path: /etc/ssl/legacy
+        state: directory
+        mode: "0755"
+
+    - name: Mover cert a la ubicación legacy
+      ansible.builtin.copy:
+        src: /etc/nginx/ssl/apps.crt
+        dest: /etc/ssl/legacy/apps.crt
+        remote_src: true
+        mode: "0644"
+
+    - name: Mover key a la ubicación legacy
+      ansible.builtin.copy:
+        src: /etc/nginx/ssl/apps.key
+        dest: /etc/ssl/legacy/apps.key
+        remote_src: true
+        mode: "0600"
+
+    - name: Reescribir la config de nginx para que apunte al cert legacy
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/apps.conf
+        mode: "0644"
+        content: |
+          server {
+            listen 443 ssl;
+            server_name apps.lab.ulpgc.local;
+            ssl_certificate     /etc/ssl/legacy/apps.crt;
+            ssl_certificate_key /etc/ssl/legacy/apps.key;
+            location / {
+              add_header Content-Type text/plain;
+              return 200 "Hola desde {{ inventory_hostname }} (cert legacy)\n";
+            }
+          }
+
+    - name: Borrar cert de la ubicación nueva (para dejar el escenario limpio)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nginx/ssl/apps.crt
+        - /etc/nginx/ssl/apps.key
+
+    - name: Validar config y recargar nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Resumen del escenario preparado
+      ansible.builtin.debug:
+        msg:
+          - "Escenario legacy preparado en {{ inventory_hostname }}:"
+          - "  Cert ahora en: /etc/ssl/legacy/apps.crt"
+          - "  Key  ahora en: /etc/ssl/legacy/apps.key"
+          - "  nginx config apunta a /etc/ssl/legacy/"
+          - "  → Ejecuta 23_relocate_cert.yml para consolidar a /etc/nginx/ssl/"

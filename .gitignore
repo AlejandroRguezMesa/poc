@@ -1,0 +1,19 @@
+# Reportes generados por el descubrimiento
+reports/
+
+# Backups de host_vars
+inventory/host_vars/*.bak.*
+
+# Ficheros temporales
+*.retry
+*.pyc
+__pycache__/
+
+# La passphrase del vault NUNCA se sube
+.vault_pass
+
+# Certificados y claves del lab (material criptográfico)
+pki/ca/
+pki/old/
+pki/new/
+files/certs_input/

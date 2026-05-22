@@ -1,0 +1,3 @@
+---
+# Los handlers de reload van en el playbook que llama al role,
+# o en bootstrap_nginx. Este fichero existe por consistencia de estructura.

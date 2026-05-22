@@ -1,0 +1,14 @@
+[web_cluster]
+lab-web-01 ansible_host=192.168.56.11
+lab-web-02 ansible_host=192.168.56.12
+
+[tomcat_servers]
+lab-tomcat ansible_host=192.168.56.20
+
+[httpd_servers]
+lab-rhel-01 ansible_host=192.168.56.13
+
+
+[all:vars]
+ansible_user=aleja
+ansible_python_interpreter=/usr/bin/python3

@@ -1,0 +1,56 @@
+---
+- name: "[{{ ks.name }}] Construir PKCS#12 en el nodo de control"
+  community.crypto.openssl_pkcs12:
+    action: export
+    path: "/tmp/{{ ks.name }}.p12"
+    friendly_name: "{{ ks.keystore_alias }}"
+    certificate_path: "{{ ks.cert_src }}"
+    privatekey_path:  "{{ ks.key_src }}"
+    passphrase: "{{ ks.keystore_password }}"
+    state: present
+  delegate_to: localhost
+  become: false
+
+- name: "[{{ ks.name }}] Backup del keystore actual"
+  ansible.builtin.copy:
+    src: "{{ ks.keystore_dest }}"
+    dest: "{{ ks.keystore_dest }}.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    mode: preserve
+  failed_when: false
+
+- name: "[{{ ks.name }}] Desplegar keystore al host"
+  ansible.builtin.copy:
+    src: "/tmp/{{ ks.name }}.p12"
+    dest: "{{ ks.keystore_dest }}"
+    owner: "{{ ks.owner }}"
+    group: "{{ ks.group }}"
+    mode: "{{ ks.mode }}"
+  notify: "restart {{ ks.service }}"
+
+- name: "[{{ ks.name }}] Limpiar temporal del control node"
+  ansible.builtin.file:
+    path: "/tmp/{{ ks.name }}.p12"
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: "[{{ ks.name }}] Forzar restart ahora"
+  ansible.builtin.meta: flush_handlers
+
+- name: "[{{ ks.name }}] Esperar a que Tomcat responda en {{ ks.validate.port }}"
+  ansible.builtin.wait_for:
+    host: "{{ ks.validate.host }}"
+    port: "{{ ks.validate.port }}"
+    timeout: 60
+  delegate_to: localhost
+  become: false
+
+- name: "[{{ ks.name }}] Validar handshake TLS"
+  ansible.builtin.include_role:
+    name: cert_validate
+  vars:
+    v_host: "{{ ks.validate.host }}"
+    v_port: "{{ ks.validate.port }}"
+    v_sni:  "{{ ks.validate.sni }}"
+    v_expected_cn: "{{ ks.validate.sni }}"

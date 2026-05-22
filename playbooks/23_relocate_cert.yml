@@ -1,0 +1,53 @@
+---
+# Demo de reubicación: mueve el cert desde la ubicación legacy a la estándar
+# y actualiza las referencias en la config de nginx con lineinfile + regex.
+#
+# Antes de ejecutar:  ansible-playbook playbooks/22_simulate_legacy.yml
+
+- name: Reubicar certificado a ubicación estándar
+  hosts: lab-web-01
+  vars:
+    relocate:
+      cert_old_path: /etc/ssl/legacy/apps.crt
+      key_old_path:  /etc/ssl/legacy/apps.key
+      cert_new_path: /etc/nginx/ssl/apps.crt
+      key_new_path:  /etc/nginx/ssl/apps.key
+      config_file:   /etc/nginx/sites-available/apps.conf
+      # Captura "ssl_certificate <RUTA>;" preservando indentación inicial.
+      # El \1 en la línea de reemplazo conserva 'ssl_certificate ' tal cual estaba.
+      cert_regexp: '^(\s*ssl_certificate\s+)\S+;\s*$'
+      key_regexp:  '^(\s*ssl_certificate_key\s+)\S+;\s*$'
+      config_test_cmd: "nginx -t"
+      service: nginx
+
+  tasks:
+    - name: "Estado antes — mostrar la directiva ssl_certificate"
+      ansible.builtin.command: "grep -E 'ssl_certificate' {{ relocate.config_file }}"
+      register: before
+      changed_when: false
+
+    - name: "Antes de reubicar"
+      ansible.builtin.debug:
+        var: before.stdout_lines
+
+    - name: "Ejecutar reubicación"
+      ansible.builtin.include_role:
+        name: cert_relocate
+
+    - name: "Estado después — mostrar la directiva ssl_certificate"
+      ansible.builtin.command: "grep -E 'ssl_certificate' {{ relocate.config_file }}"
+      register: after
+      changed_when: false
+
+    - name: "Después de reubicar"
+      ansible.builtin.debug:
+        var: after.stdout_lines
+
+    - name: "Validar TLS funcionando tras la reubicación"
+      ansible.builtin.include_role:
+        name: cert_validate
+      vars:
+        v_host: "{{ ansible_host }}"
+        v_port: 443
+        v_sni:  apps.lab.ulpgc.local
+        v_expected_cn: apps.lab.ulpgc.local

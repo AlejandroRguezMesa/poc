@@ -1,0 +1,61 @@
+---
+# Genera ficheros host_vars/<host>.yml a partir de los reportes JSON
+# del descubrimiento (reports/<host>.json).
+#
+# Prerrequisito: ejecutar antes 10_discover.yml.
+#
+# Uso:
+#   ansible-playbook playbooks/10_discover.yml
+#   ansible-playbook playbooks/15_generate_host_vars.yml
+
+- name: Generar host_vars desde el descubrimiento
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  vars:
+    project_root:    "{{ playbook_dir }}/.."
+    reports_dir:     "{{ project_root }}/reports"
+    host_vars_dir:   "{{ project_root }}/inventory/host_vars"
+    certs_input_dir: "files/certs_input"
+    script_path:     "{{ project_root }}/scripts/generate_host_vars.py"
+
+  tasks:
+    - name: Asegurar carpeta de scripts
+      ansible.builtin.file:
+        path: "{{ project_root }}/scripts"
+        state: directory
+
+    - name: Verificar que el script existe
+      ansible.builtin.stat:
+        path: "{{ script_path }}"
+      register: script_stat
+
+    - name: Abortar si falta el script
+      ansible.builtin.assert:
+        that:
+          - script_stat.stat.exists
+        fail_msg: >
+          Falta {{ script_path }}.
+          Copia el fichero generate_host_vars.py al directorio scripts/.
+
+    - name: Asegurar PyYAML disponible
+      ansible.builtin.pip:
+        name: PyYAML
+        state: present
+        extra_args: "--break-system-packages"
+      failed_when: false
+
+    - name: Ejecutar el generador
+      ansible.builtin.command:
+        cmd: >
+          python3 {{ script_path }}
+          --reports-dir {{ reports_dir }}
+          --host-vars-dir {{ host_vars_dir }}
+          --certs-input-dir {{ certs_input_dir }}
+      register: gen_result
+      changed_when: true
+
+    - name: Salida del generador
+      ansible.builtin.debug:
+        var: gen_result.stdout_lines

@@ -1,0 +1,17 @@
+---
+# Renovación del certificado del cluster web (nginx).
+# Despliega uno a uno con `serial: 1`, valida TLS antes de pasar al siguiente.
+# `max_fail_percentage: 0`: si un nodo falla, no toca los siguientes.
+
+- name: Renovar certificado del cluster web
+  hosts: web_cluster
+  serial: 1
+  max_fail_percentage: 0
+  tasks:
+    - name: Desplegar certificados definidos en host_vars
+      ansible.builtin.include_role:
+        name: cert_deploy_pem
+      loop: "{{ certificates }}"
+      loop_control:
+        loop_var: cert
+        label: "{{ cert.name }}"

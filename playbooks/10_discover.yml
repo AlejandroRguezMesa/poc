@@ -1,0 +1,117 @@
+---
+# Descubre certificados desplegados y genera CSV consolidado.
+# La columna `service` se determina cruzando fingerprints disco ↔ TLS servido,
+# sin asumir puertos estándar.
+#
+# Resultado típico de la columna `service`:
+#   "nginx en :443"      → cert servido por nginx, fingerprints coinciden
+#   "java en :9443"      → cert servido por proceso java en puerto no estándar
+#   "no servido"         → cert en disco que nadie sirve (huérfano)
+#   "(por ruta) tomcat"  → fallback si no se pudo cruzar (servicio parado)
+
+- name: Descubrir certificados desplegados
+  hosts: all
+  roles:
+    - cert_inventory
+
+- name: Consolidar reporte CSV
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Unir reportes JSON en un CSV
+      ansible.builtin.shell: |
+        python3 - <<'PY'
+        import json, glob, csv, re
+
+        # Patrones de fallback por ruta (cuando el cruce de fingerprints
+        # no es posible: servicio parado, cert no asociado a ningún puerto).
+        PATH_RULES = [
+            (r"^/etc/nginx/",       "nginx"),
+            (r"^/etc/apache2/",     "apache"),
+            (r"^/etc/httpd/",       "apache"),
+            (r"^/etc/tomcat\d*/",   "tomcat"),
+            (r"^/opt/tomcat",       "tomcat"),
+            (r"^/etc/letsencrypt/", "letsencrypt"),
+            (r"^/etc/postfix/",     "postfix"),
+            (r"^/etc/dovecot/",     "dovecot"),
+            (r"^/etc/openldap/",    "openldap"),
+            (r"^/etc/ldap/",        "openldap"),
+            (r"^/etc/haproxy/",     "haproxy"),
+            (r"\.p12$",             "tomcat"),
+            (r"\.pfx$",             "iis"),
+        ]
+
+        def extract_path(c):
+            item = c.get("item", {})
+            if isinstance(item, dict):
+                if "path" in item:
+                    return item["path"]
+                inner = item.get("item", {})
+                if isinstance(inner, dict) and "path" in inner:
+                    return inner["path"]
+            return ""
+
+        def file_fingerprint(c):
+            """SHA256 del cert, normalizado a hex sin separadores ni mayúsculas
+               para comparar contra el output de openssl x509."""
+            fp = c.get("fingerprints", {}).get("sha256", "")
+            return fp.replace(":", "").upper()
+
+        def infer_service(path, served_fps, listening, file_fp):
+            """
+            1) Cruzar: ¿este fingerprint está siendo servido en algún puerto?
+               → "nginx en :443"  (o el que sea)
+            2) Si no, ¿hay servicio escuchando en puerto típico de algo
+               cuya ruta coincida con la del cert? → "(por ruta) nginx"
+            3) Si no, "no servido"
+            """
+            # 1) Cruce de fingerprints (lo más fiable)
+            for port, served_fp in (served_fps or {}).items():
+                if served_fp.upper() == file_fp:
+                    proc = (listening or {}).get(port, "desconocido")
+                    return f"{proc} en :{port}"
+
+            # 2) Fallback por ruta
+            for pattern, service in PATH_RULES:
+                if re.search(pattern, path):
+                    return f"(por ruta) {service}"
+
+            # 3) Sin pista
+            return "no servido"
+
+        rows = []
+        for f in glob.glob("{{ playbook_dir }}/../reports/*.json"):
+            for c in json.load(open(f)):
+                path     = extract_path(c)
+                file_fp  = file_fingerprint(c)
+                served   = c.get("served_fingerprints", {})
+                listening = c.get("listening_ports", {})
+                rows.append({
+                    "host":       c["host"],
+                    "service":    infer_service(path, served, listening, file_fp),
+                    "path":       path,
+                    "subject_cn": c["subject"].get("commonName", ""),
+                    "san":        ";".join(c.get("subject_alt_name", []) or []),
+                    "issuer_cn":  c["issuer"].get("commonName", ""),
+                    "not_after":  c["not_after"],
+                    "expired":    c["expired"],
+                })
+
+        out = "{{ playbook_dir }}/../reports/consolidated.csv"
+        if rows:
+            with open(out, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=rows[0].keys())
+                w.writeheader()
+                w.writerows(rows)
+            print(f"Generado {out} con {len(rows)} filas")
+        else:
+            print("Sin certificados encontrados")
+        PY
+      args:
+        executable: /bin/bash
+      register: result
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        var: result.stdout_lines

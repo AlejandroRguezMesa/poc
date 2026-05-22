@@ -1,0 +1,19 @@
+all:
+  children:
+    web_cluster:
+      hosts:
+        lab-web-01:
+          ansible_host: 192.168.56.11
+        lab-web-02:
+          ansible_host: 192.168.56.12
+    tomcat_servers:
+      hosts:
+        lab-tomcat:
+          ansible_host: 192.168.56.20
+    httpd_servers:
+      hosts:
+        lab-rhel-01:
+          ansible_host: 192.168.56.13
+  vars:
+    ansible_user: aleja
+    ansible_python_interpreter: /usr/bin/python3

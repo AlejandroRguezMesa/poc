@@ -1,0 +1,59 @@
+---
+- name: Instalar nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+
+- name: Crear directorio de certificados
+  ansible.builtin.file:
+    path: /etc/nginx/ssl
+    state: directory
+    mode: "0755"
+
+- name: Desplegar cert antiguo (estado inicial "producción")
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/apps.crt"
+    dest: /etc/nginx/ssl/apps.crt
+    mode: "0644"
+
+- name: Desplegar key antigua
+  ansible.builtin.copy:
+    src: "{{ old_certs_dir }}/apps.key"
+    dest: /etc/nginx/ssl/apps.key
+    mode: "0600"
+
+- name: Configurar vhost HTTPS
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/apps.conf
+    mode: "0644"
+    content: |
+      server {
+        listen 443 ssl;
+        server_name apps.lab.ulpgc.local;
+        ssl_certificate     /etc/nginx/ssl/apps.crt;
+        ssl_certificate_key /etc/nginx/ssl/apps.key;
+        location / {
+          add_header Content-Type text/plain;
+          return 200 "Hola desde {{ inventory_hostname }}\n";
+        }
+      }
+
+- name: Habilitar vhost
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/apps.conf
+    dest: /etc/nginx/sites-enabled/apps.conf
+    state: link
+  notify: reload nginx
+
+- name: Quitar default
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx
+
+- name: Arrancar nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

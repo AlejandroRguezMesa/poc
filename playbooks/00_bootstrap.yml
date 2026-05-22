@@ -1,0 +1,18 @@
+---
+# Estado inicial del lab: instala nginx + tomcat y despliega los certs "viejos"
+# (caducan en 7 días). Simula que el entorno ya está montado en producción.
+
+- name: Bootstrap web cluster
+  hosts: web_cluster
+  roles:
+    - bootstrap_nginx
+
+- name: Bootstrap Tomcat
+  hosts: tomcat_servers
+  roles:
+    - bootstrap_tomcat
+
+- name: Bootstrap httpd (RHEL + Apache)
+  hosts: httpd_servers
+  roles:
+    - bootstrap_httpd

@@ -1,0 +1,24 @@
+---
+- name: "Validar TLS contra {{ v_host }}:{{ v_port }} (SNI {{ v_sni }})"
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo | openssl s_client -connect {{ v_host }}:{{ v_port }} \
+      -servername {{ v_sni }} 2>/dev/null \
+      | openssl x509 -noout -subject -enddate
+  args:
+    executable: /bin/bash
+  register: tls_check
+  changed_when: false
+  delegate_to: localhost
+  become: false
+
+- name: "Comprobar que el CN servido coincide con el esperado"
+  ansible.builtin.assert:
+    that:
+      - v_expected_cn in tls_check.stdout
+    fail_msg: "El servicio NO está sirviendo el cert esperado ({{ v_expected_cn }}). Salida: {{ tls_check.stdout }}"
+    success_msg: "OK — {{ v_host }} sirve {{ v_expected_cn }}"
+
+- name: "Mostrar fecha de caducidad del cert servido"
+  ansible.builtin.debug:
+    msg: "{{ tls_check.stdout_lines }}"

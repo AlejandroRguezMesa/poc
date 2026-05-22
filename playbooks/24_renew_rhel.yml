@@ -1,0 +1,16 @@
+---
+# Renovación en RHEL (httpd) usando el MISMO role que para nginx.
+# Solo el host_vars cambia.
+
+- name: Renovar certificado httpd (RHEL)
+  hosts: httpd_servers
+  serial: 1
+  max_fail_percentage: 0
+  tasks:
+    - name: Desplegar certificados definidos en host_vars
+      ansible.builtin.include_role:
+        name: cert_deploy_pem
+      loop: "{{ certificates }}"
+      loop_control:
+        loop_var: cert
+        label: "{{ cert.name }}"

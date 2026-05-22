@@ -1,0 +1,182 @@
+---
+# Descontinuar un certificado y su servicio asociado.
+# Caso de uso: "este servicio ya no se usa, hay que desmontarlo limpiamente".
+#
+# Acciones:
+#   1) Verificar que el cert está sirviéndose (si no, ya está desmontado).
+#   2) Parar nginx/apache/httpd para que no siga usando el cert.
+#   3) Borrar el fichero de configuración del vhost.
+#   4) Cerrar el puerto en firewalld.
+#   5) Validar config tras quitar el vhost.
+#   6) Re-arrancar el servicio (sin el vhost).
+#   7) Borrar material criptográfico (cert + key + backups).
+#   8) Registrar la operación.
+#
+# Uso:
+#   ansible-playbook playbooks/31_decommission_cert.yml \
+#     -e "target_hosts=lab-rhel-01" \
+#     -e "vhost_conf=/etc/httpd/conf.d/internal.conf" \
+#     -e "cert_dest=/etc/pki/tls/certs/internal.crt" \
+#     -e "key_dest=/etc/pki/tls/private/internal.key" \
+#     -e "port=8443" \
+#     -e "service=httpd" \
+#     -e "config_test_cmd='httpd -t'"
+
+- name: Descontinuar servicio + certificado
+  hosts: "{{ target_hosts | mandatory }}"
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+
+  vars:
+    vhost_conf:      "{{ vhost_conf | mandatory }}"
+    cert_dest:       "{{ cert_dest | mandatory }}"
+    key_dest:        "{{ key_dest | mandatory }}"
+    port:            "{{ port | mandatory }}"
+    service:         "{{ service | mandatory }}"
+    config_test_cmd: "{{ config_test_cmd | default('true') }}"
+
+  tasks:
+    - name: Confirmación previa
+      ansible.builtin.pause:
+        prompt: |
+
+          ╔══════════════════════════════════════════════════════════════╗
+          ║  DESCONTINUACIÓN DE CERTIFICADO Y SERVICIO                   ║
+          ╠══════════════════════════════════════════════════════════════╣
+          ║  Host:        {{ inventory_hostname }}
+          ║  Vhost:       {{ vhost_conf }}
+          ║  Cert:        {{ cert_dest }}
+          ║  Key:         {{ key_dest }}
+          ║  Puerto:      {{ port }}
+          ║  Servicio:    {{ service }}
+          ╚══════════════════════════════════════════════════════════════╝
+
+          Esta operación quita el vhost, cierra el puerto, y borra el
+          material criptográfico. ENTER para continuar, Ctrl+C para abortar.
+      run_once: true
+
+    - name: "[decomm] Capturar fingerprint del cert antes de borrar"
+      community.crypto.x509_certificate_info:
+        path: "{{ cert_dest }}"
+      register: cert_info
+      failed_when: false
+
+    - name: "[decomm] Verificar que el cert se sirve en el puerto indicado"
+      ansible.builtin.shell: |
+        set -o pipefail
+        timeout 3 bash -c "echo | openssl s_client -connect 127.0.0.1:{{ port }} \
+          -servername $(openssl x509 -in {{ cert_dest }} -noout -subject \
+                        | sed 's/.*CN *= *//; s/,.*//')" 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 \
+        | sed 's/^.*=//; s/://g'
+      args:
+        executable: /bin/bash
+      register: served_fp
+      changed_when: false
+      failed_when: false
+
+    - name: "[decomm] Mostrar estado actual"
+      ansible.builtin.debug:
+        msg:
+          - "Fingerprint del cert en disco: {{ cert_info.fingerprints.sha256 | default('N/A') | replace(':','') }}"
+          - "Fingerprint servido en :{{ port }}: {{ served_fp.stdout }}"
+          - "Sirviendo este cert: {{ (cert_info.fingerprints.sha256 | default('') | replace(':','') | upper) == served_fp.stdout | upper }}"
+
+    # Quitar el vhost ANTES de parar el servicio, así al reload el cambio aplica
+    - name: "[decomm] Backup del vhost antes de borrar"
+      ansible.builtin.copy:
+        src: "{{ vhost_conf }}"
+        dest: "{{ vhost_conf }}.decomm-{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        mode: preserve
+      failed_when: false
+
+    - name: "[decomm] Borrar fichero de configuración del vhost"
+      ansible.builtin.file:
+        path: "{{ vhost_conf }}"
+        state: absent
+
+    - name: "[decomm] Validar config del servicio sin el vhost"
+      ansible.builtin.command: "{{ config_test_cmd }}"
+      register: cfg_test
+      changed_when: false
+      failed_when: cfg_test.rc != 0
+
+    - name: "[decomm] Recargar servicio para aplicar"
+      ansible.builtin.service:
+        name: "{{ service }}"
+        state: reloaded
+
+    - name: "[decomm] Comprobar que el puerto ya no responde TLS"
+      ansible.builtin.shell: |
+        timeout 2 bash -c "echo | openssl s_client -connect 127.0.0.1:{{ port }} 2>/dev/null" \
+        | openssl x509 -noout -subject 2>/dev/null \
+        && echo "AÚN_SIRVE" || echo "NO_SIRVE"
+      args:
+        executable: /bin/bash
+      register: post_check
+      changed_when: false
+
+    - name: "[decomm] Avisar si el puerto sigue sirviendo TLS"
+      ansible.builtin.debug:
+        msg: "ATENCIÓN — el puerto {{ port }} sigue sirviendo TLS. Revisar manualmente."
+      when: "'AÚN_SIRVE' in post_check.stdout"
+
+    - name: "[decomm] Cerrar puerto en firewalld"
+      ansible.posix.firewalld:
+        port: "{{ port }}/tcp"
+        permanent: true
+        immediate: true
+        state: disabled
+      failed_when: false
+
+    - name: "[decomm] Borrar certificado"
+      ansible.builtin.file:
+        path: "{{ cert_dest }}"
+        state: absent
+
+    - name: "[decomm] Borrar clave privada"
+      ansible.builtin.file:
+        path: "{{ key_dest }}"
+        state: absent
+
+    - name: "[decomm] Buscar y borrar backups del cert"
+      ansible.builtin.find:
+        paths:
+          - "{{ cert_dest | dirname }}"
+          - "{{ key_dest | dirname }}"
+        patterns:
+          - "{{ cert_dest | basename }}.*"
+          - "{{ key_dest | basename }}.*"
+      register: backups
+
+    - name: "[decomm] Borrar backups encontrados"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ backups.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: "[decomm] Registrar en log de auditoría"
+      ansible.builtin.lineinfile:
+        path: /var/log/cert-decommissions.log
+        line: >-
+          {{ ansible_date_time.iso8601 }}  host={{ inventory_hostname }}
+          cert={{ cert_dest }}  service={{ service }}
+          port={{ port }}
+          backups_removed={{ backups.files | length }}
+        create: true
+        mode: "0644"
+
+    - name: "[decomm] Resumen final"
+      ansible.builtin.debug:
+        msg:
+          - "Descontinuación completada en {{ inventory_hostname }}:"
+          - "  Vhost eliminado:  {{ vhost_conf }}"
+          - "  Cert borrado:     {{ cert_dest }}"
+          - "  Key borrada:      {{ key_dest }}"
+          - "  Backups borrados: {{ backups.files | length }}"
+          - "  Puerto cerrado:   {{ port }}/tcp"
+          - "  IMPORTANTE: marca el cert como revocado en la CA (portal Sectigo/GÉANT)"
